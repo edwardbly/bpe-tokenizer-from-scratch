@@ -5,7 +5,7 @@ Captured after building and testing the v1 tokenizer on:
 - Alice's Adventures in Wonderland (full book, target_vocab_size=500)
 - A short Python code sample (3 functions, target_vocab_size=150)
 
-## 1. Pre-tokenization: split punctuation from words before BPE runs
+## 1. Pre-tokenization: split punctuation from words before BPE runs — ✅ DONE
 
 **Problem observed:** our current `get_word_freqs` only splits on whitespace
 (`text.split()`), so punctuation stays glued to words.
@@ -19,15 +19,46 @@ Evidence from Python code training (more severe):
   collapsed into one token
 - `('tuple(list(word', ')_')` — parens and method calls fused into identifiers
 
-**Goal:** write a pre-tokenization step that separates punctuation
-(`. , ( ) [ ] { } : ; = + - " '` etc.) into their own standalone units
-*before* character-level BPE training begins. This should let BPE learn
-cleaner, more generalizable subword patterns instead of memorizing
-punctuation-glued artifacts.
+**What was built:** `split_punctuation` and `split_all_punctuation`, wired
+into `get_word_freqs`, repeatedly split any word on the first punctuation
+character found (using `string.punctuation`) until no punctuation remains.
+A `NO_SPACE` marker (Unicode WORD JOINER, `\u2060`) is attached to split-off
+pieces so the original spacing is exactly preserved on decode — e.g. "is,"
+correctly reconstructs from two independent tokens, "is" and ",", with no
+stray space inserted between them.
 
-**Open question to explore:** should the apostrophe in contractions/possessives
-("Alice's", "don't") be treated as a special case and kept attached, since it
-carries meaning — vs. periods/commas/brackets, which are purely structural?
+**Resolved open question (apostrophes):** tested treating the apostrophe as
+ordinary punctuation, split the same as everything else, rather than a
+special case. Decided against special-casing it after recognizing the same
+character (`'`) is used both for English possessives/contractions *and* as
+a Python string delimiter — a context-blind special case would help one
+domain (prose) while actively breaking the other (code). Confirmed via
+testing that common words still merge correctly regardless of how an
+individual instance was originally split (e.g. "Alice" reliably forms the
+same way whether standalone or extracted from "Alice's"), since BPE's
+frequency-driven merging makes this self-correcting — no special-casing
+needed.
+
+**Verified outcome:** re-ran training on both Alice in Wonderland and the
+Python code sample with the fix in place. Punctuation now merges as its own
+free-standing, reusable token (e.g. `('¤,', '▁')` for a standalone comma)
+rather than fusing to adjacent words. The Python code runaway-merging
+failure mode is gone — training now stops early ("no more pairs to merge")
+on clean, recognizable identifiers (`tuple`, `list`, `range`, `len`,
+`symbol`) instead of continuing to manufacture larger tokens by absorbing
+syntax characters. Full before/after comparison documented in the notebook,
+Sections 4 and 5.
+
+**Marker character design note:** also discovered during this work that the
+original `'_'` end-of-word marker collided with real underscores in Python
+variable names (e.g. `word_freqs`). Replaced with `END_OF_WORD` (`\u2581`,
+matching SentencePiece's convention) and `NO_SPACE` (`\u2060`, Unicode WORD
+JOINER) — both chosen specifically to avoid colliding with characters that
+could legitimately appear in real text or code. Configurable debug-mode
+substitutes (`§`, `¤`) are available for human-readable output during
+inspection, independently toggleable per marker since `END_OF_WORD` already
+renders clearly while the real `NO_SPACE` character prints as an unreadable
+escape code.
 
 ## 2. Efficiency: avoid rebuilding the entire dataset on every merge
 
