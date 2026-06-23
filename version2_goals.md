@@ -88,7 +88,7 @@ demonstration of why production tokenizers need large, diverse training
 corpora relative to their target vocabulary size — not just a bug to silently
 fix.
 
-## 4. Multi-source training (train on many files without holding them all in memory)
+## 4. Multi-source training (train on many files without holding them all in memory) — ✅ DONE
 
 **Motivation:** a tokenizer trained on a single source (one book, one small
 code sample) overfits to that source's quirks, as seen directly in Section 5
@@ -97,46 +97,55 @@ many diverse sources — many books, many authors, many codebases — to learn
 genuinely generalizable patterns. `train_bpe` currently only accepts one
 `text` argument, so this needs new plumbing, not just more input data.
 
-**The naive approach (concatenate everything into one giant string first)
-doesn't scale:** with a large number of source files (e.g. 100,000 ebooks),
-holding all raw text in memory simultaneously before processing is wasteful
-and may not be feasible at all.
+**What was built:**
+- `merge_freq_dicts(master, new, stats=None)` — merges a new `word_freqs`
+  dictionary into an existing master **in place** (no new dictionary created,
+  no return value — follows Python's mutation convention of returning `None`).
+  Includes `raise TypeError` validation on both inputs so a user calling this
+  directly with wrong types gets an immediate, informative error rather than
+  silent data corruption. Optional `stats` parameter accumulates new/old word
+  counts for discovery-rate tracking without changing the function's core job.
+- `train_bpe_multi(file_list, target_vocab_size, stats_interval=None)` —
+  processes one file at a time into `word_freqs`, merges into a running
+  `master_freqs` as it goes, converts to `symbol_freqs` exactly once at the
+  end, then runs the existing merge loop unchanged. Per-file `try/except`
+  ensures one bad file is skipped and flagged immediately without losing
+  completed work. Optional `stats_interval` parameter enables new-word
+  discovery tracking at configurable checkpoints, returning a list of
+  `(book_number, new_percentage)` tuples alongside merges and vocab.
 
-**The better approach, worked out conceptually:**
-1. Process each source file independently into its own `word_freqs`
-   dictionary (counting is associative/order-independent, so this is valid —
-   counting file-by-file and summing afterward gives the identical result to
-   counting everything at once).
-2. Merge all per-file `word_freqs` dictionaries into one combined dictionary,
-   summing counts for any word that appears in more than one source.
-3. Only **after** merging, run `words_to_symbols` once on the combined
-   dictionary — not once per file. Converting before merging would mean
-   carrying forward redundant, larger symbol-tuple entries for every
-   duplicate word across every file, instead of deduplicating early while
-   entries are still in their smaller, simpler word form.
-4. Proceed with the rest of `train_bpe` (pair counting, merging) unchanged,
-   on the combined `symbol_freqs`.
+**Key design decisions made during implementation:**
+- `merge_freq_dicts` modifies `master` in place rather than returning a new
+  dictionary — avoids recreating a growing dictionary on every call, which
+  would copy all existing entries even when only a small fraction changed
+- `words_to_symbols` called once on the fully-merged `master_freqs`, not per
+  file — deduplication happens at the word level (smaller, simpler objects)
+  before conversion to the larger symbol-tuple form
+- `try/except` wraps each individual file, not the entire loop — one bad file
+  skips with a warning while completed work in `master_freqs` is preserved
+- Scope boundary documented: `train_bpe_multi` assumes pre-cleaned input;
+  source-specific cleaning (e.g. Gutenberg header/footer stripping) is a
+  separate, out-of-scope concern
 
-**Memory benefit:** only one file's raw text needs to be in memory at a
-time; it gets collapsed into a (much smaller) frequency dictionary
-immediately and discarded before moving to the next file. The thing that
-persists across the whole run — the running combined frequency dictionary —
-grows much more slowly than the raw input, since after enough sources, most
-new files mostly increment existing counts rather than introducing new
-words.
+**Experiment run (Section 6):** tested on 10 public domain texts from Project
+Gutenberg spanning 1,500 years of written English. Key findings:
+1. BPE vocabulary is order-independent — both a descending-size run and a
+   randomized run produced identical merges and vocab (332 merges, 500 tokens)
+2. New-word discovery tapers but not smoothly — driven by source diversity
+   relative to accumulated vocabulary, not just position in sequence
+3. Complete duplicates produce exactly 0.0 discovery rate (romeo_clean.txt)
+4. "Same work, different edition" can mean something significant — First Folio
+   transcription contributed ~40% novelty due to systematic 17th-century
+   spelling conventions preserved from the 1623 printed text
+5. Domain and genre diversity matter as much as chronological distance —
+   The City of God (5th-century theology) and A Room with a View (Edwardian
+   fiction) both contributed unexpectedly high novelty relative to their
+   position, due to vocabulary domain differences rather than era alone
 
-**To build:**
-- `merge_freq_dicts(dict_list)` — combine a list of `word_freqs`
-  dictionaries into one, summing counts on matching keys (same
-  `dict.get(key, 0) + count` pattern already used in `get_pair_freqs`)
-- A wrapper (e.g. `train_bpe_multi(file_list, target_vocab_size)`) that
-  reads/processes one file at a time into `word_freqs`, merges as it goes,
-  and only converts to symbols and runs the merge loop once at the end
-
-**Open question:** at what scale does even the combined frequency
-dictionary itself become a memory concern, and would that require a
-different approach (e.g. periodic on-disk checkpointing)? Likely out of
-scope to actually implement, but worth being able to discuss.
+**Open question (deferred, worth discussing):** at what scale does even the
+combined frequency dictionary itself become a memory concern, and would that
+require a different approach (e.g. periodic on-disk checkpointing)? Not
+implemented, but the design reasoning is documented above.
 
 ## 5. (Optional stretch) Compare against a real-world tokenizer
 

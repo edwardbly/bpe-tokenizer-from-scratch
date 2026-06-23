@@ -1,8 +1,9 @@
 # Jupyter autosave/checkpoint files — not meant to be tracked
 .ipynb_checkpoints/
 
-# Large source text file — obtained separately per README instructions
-alice.txt
+# Source text files — obtained separately per README instructions
+# (see README for download links)
+*.txt
 
 # Common Python/OS clutter, in case any of these appear later
 __pycache__/
